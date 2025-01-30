@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optprops"
+version = "0.1.0"
+description = "A tool to compute the optical properties of circumstellar dust particles as well as their resulting equilibrium temperatures and thermal emission."
+authors = [
+    { name = "Max Sommer", email = "ms3078@cam.ac.uk" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+    "astropy",
+    "matplotlib",
+    "mkdocs"
+]
