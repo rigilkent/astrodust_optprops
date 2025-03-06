@@ -1,109 +1,8 @@
 import numpy as np
-import warnings
 import astropy.constants as const
 from scipy.integrate import simpson
 from numba import jit
 
-def calc_temperatures(diams, dists, star, matrl, refmed=1.0, n_step=400, ism=False, 
-        max_iterations=100, tolerance=.001):
-    """
-    Calculates the temperature of dust particles of different sizes at different distances from a star.
-    The temperature is computed iteratively using the energy balance between the absorbed stellar radiation
-    and the emitted thermal radiation from the dust particles.
-
-    Args:
-        diams (numpy.ndarray): Array of particle diameters in µm
-        dists (numpy.ndarray): Array of distances from star in AU
-        star (Star): Object containing stellar properties
-        matrl (Material): Object containing material properties
-        refmed (float, optional): Refractive index of medium. Defaults to 1.0.
-        n_step (int, optional): Number of integration steps. Defaults to 400.
-        ism (bool, optional): Whether to use interstellar medium. Defaults to False.  
-        max_iterations (int, optional): Maximum iterations for temperature convergence. Defaults to 1000.
-        tolerance (float, optional): Relative change threshold for convergence. Defaults to 0.002.
-
-    Returns:
-        numpy.ndarray: 2D array of calculated temperatures [K] indexed by diameter and distance
-
-    Raises:
-        RuntimeError: If temperature calculation does not converge
-    """
-    n_diams = len(diams)
-    n_dists = len(dists)
-    temps = np.zeros((n_diams, n_dists))
-
-    # Pre-calculate stellar spectrum quantities
-    star_logwavs = get_logwav_integration_grid(star.temp, n_step)    
-    star_flux = calc_spectral_flux_density(star_logwavs, star=star, qout=0)
-    total_star_flux = np.trapezoid(star_flux, star_logwavs)
-    
-    # Calculate blackbody temperatures at each distance as initial guesses
-    temps_bb = np.array([calc_blackbody_temp(star=star, dist=dist) for dist in dists])
-
-    # Calculate absorption efficiency averaged over stellar spectrum for each diameter
-    stellar_qabs = np.zeros(n_diams)
-    for i in range(n_diams):
-        absorbed_qbl = calc_spectral_flux_density(star_logwavs, star=star, qout=1, diam=diams[i], matrl=matrl, 
-            refmed=refmed, ism=ism)
-        absorbed_flux = np.trapezoid(absorbed_qbl, star_logwavs)
-        stellar_qabs[i] = absorbed_flux / total_star_flux
-    
-    # Calculate temperatures for each diameter and distance
-    for dist_idx in range(n_dists):        
-        for diam_idx in range(n_diams):
-            # Use previous particle's temperature as initial guess
-            if diam_idx > 0:
-                curr_temp = temps[diam_idx-1, dist_idx] 
-            else:
-                curr_temp = temps_bb[dist_idx]
-            
-            prev_temp = curr_temp
-            prev_diff = None
-            damping = 1
-            # Temperature iteration loop
-            for iter_count in range(max_iterations):
-                # Calculate blackbody flux at current temperature
-                bb_flux = const.sigma_sb.value * curr_temp**4
-                curr_logwavs = get_logwav_integration_grid(curr_temp, n_step)
-                
-                # Calculate absorption averaged over emission spectrum
-                emitted_qbl = calc_spectral_flux_density(curr_logwavs, temp=curr_temp, qout=1, diam=diams[diam_idx], 
-                    matrl=matrl, refmed=refmed, ism=ism)
-                emitted_flux = np.trapezoid(emitted_qbl, curr_logwavs)
-                curr_qabs = emitted_flux / bb_flux
-
-                # Calculate temperature difference
-                target_temp = temps_bb[dist_idx] * np.sqrt(np.sqrt(stellar_qabs[diam_idx] / curr_qabs))
-                temp_diff = curr_temp - target_temp
-
-                # Update temperature using secant method
-                if prev_diff is None:
-                    # First iteration - use simple step
-                    new_temp = curr_temp - temp_diff
-                elif (temp_diff * prev_diff) < 0 or abs(temp_diff - prev_diff) < .1:
-                    # Sign flip occurred or denominator is < 0.1 K - use simple damped step to avoid oscillation
-                    damping *= 0.75
-                    new_temp = curr_temp - damping * temp_diff
-                else:
-                    # Otherwise - use secant method
-                    new_temp = curr_temp - temp_diff * (curr_temp - prev_temp) / (temp_diff - prev_diff)
-                
-                rel_change = abs(new_temp / curr_temp - 1)
-                if rel_change < tolerance:
-                    break
-                
-                prev_temp = curr_temp
-                prev_diff = temp_diff
-                curr_temp = max(new_temp, 1.0)  # Avoid negative temperature guesses
-
-            if iter_count == max_iterations:
-                raise RuntimeError(f"""Temperature calculation did not converge after {max_iterations} iterations
-                    for diameter={diams[diam_idx]}, distance={dists[dist_idx]},
-                    qsil={matrl.qsil}, qice={matrl.qice}, mpor={matrl.mpor}.""")
-
-            temps[diam_idx, dist_idx] = new_temp
-
-    return temps
 
 def get_logwav_integration_grid(temperature, n_step=400):
     """
@@ -116,6 +15,8 @@ def get_logwav_integration_grid(temperature, n_step=400):
     Returns:
         numpy.ndarray: An array of log10(lambda) values over the specified wavelength range.
     """
+    if temperature <= 0:
+        raise ValueError("Temperature must be greater than 0 K")
     wav_1 = 289.8 / temperature
     wav_2 = 2898000.0 / temperature
     logwav_1 = np.log10(wav_1)
@@ -124,7 +25,7 @@ def get_logwav_integration_grid(temperature, n_step=400):
 
     return logwavs
 
-def calc_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None, matrl=None, refmed=1.0, ism=False):
+def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None, matrl=None):
     """
     Calculate Q*π*Bλ*λ*ln(10), the efficiency-weighted spectral flux density
     adjusted to allow integration over log(wavelength) to get total flux.
@@ -140,8 +41,6 @@ def calc_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None,
         qout (int, optional): Output type. 0 for Q=1.0, 1 for Qabs, 2 for Qpr. Default is 0.
         diam (float, optional): Diameter of the particle.
         matrl (Material, optional): Material object containing the material properties. Required if qout != 0.
-        refmed (float, optional): Refractive index of the medium. Default is 1.0.
-        ism (bool, optional): Boolean indicating if interstellar medium properties should be used. Default is False.
 
     Returns:
         numpy.ndarray: The calculated Q*pi*Blambda*lambda*ln(10) values.
@@ -152,7 +51,7 @@ def calc_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None,
     Note:
         The factor "pi" converts spectral radiance, Blambda (W/m^2/µm/sr), into spectral flux density, Flambda (W/m^2/µm).
         The factor "lambda*ln(10)" allows integration of Flambda over dlog(lambda) rather than dlambda.
-        One test is: ftstar = int_tabulated(logwavs, calc_spectral_flux_density(logwavs, tint=t, qint=0)) = s*t^4,
+        One test is: ftstar = int_tabulated(logwavs, calculate_spectral_flux_density(logwavs, tint=t, qint=0)) = s*t^4,
         where s = 5.67051e-8 W/m^2/K^4 is the Stefan-Boltzmann constant.
     """
 
@@ -164,12 +63,12 @@ def calc_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None,
     wavs = 10.0**logwavs
     
     if temp is not None:
-        flux = calc_spectral_flux_density_bb(wavs, temp)
+        flux = calculate_spectral_flux_density_bb(wavs, temp)
     elif star.is_blackbody:
-        flux = calc_spectral_flux_density_bb(wavs, star.temp)
+        flux = calculate_spectral_flux_density_bb(wavs, star.temp)
     else:
         # Use stellar spectrum
-        log_flux = np.interp(logwavs, star.spect_logwavs, star.spect_logflss)
+        log_flux = np.interp(logwavs, star.log_wavs, star.log_flux_lam)
         log_flux[np.isinf(log_flux)] = -50.0
         flux = 10.0**log_flux        
         
@@ -179,10 +78,10 @@ def calc_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None,
     if qout == 0:
         return flux_for_log_integration
     else:
-        return flux_for_log_integration * calc_scatt_efficiency_coeffs(wavs, diam, 
-                                          qout=qout, matrl=matrl, refmed=refmed, ism=ism)
+        return flux_for_log_integration * calculate_scatt_efficiency_coeffs(wavs, diam, 
+                                          qout=qout, matrl=matrl)
 
-def calc_spectral_flux_density_bb(wavs, temp):
+def calculate_spectral_flux_density_bb(wavs, temp):
     """
     Calculate the spectral flux density, Fλ=π*Bλ, of a black body at a given temperature.
 
@@ -197,9 +96,15 @@ def calc_spectral_flux_density_bb(wavs, temp):
     Returns:
         float or ndarray: The spectral flux density in (W/m^2/µm).
     """
-    return calc_spectral_radiance_bb(wavs, temp) * np.pi
+    return calculate_spectral_radiance_bb(wavs, temp) * np.pi
 
-def calc_spectral_radiance_bb(wavs, temp, domain='wavelength'):
+def calc_spectral_flux_density_bb(wavs, temp):
+    """
+    Wrapper needed for old optmod files. (Runs v40s)
+    """
+    return self.calculate_spectral_flux_density_bb(wavs, temp)
+
+def calculate_spectral_radiance_bb(wavs, temp, domain='wavelength'):
     """
     Calculate the spectral radiance (Bλ or B_nu) in W/m^2/µm/sr of a black body 
     for a given temperature and one or more wavelengths using Planck's law.
@@ -211,12 +116,14 @@ def calc_spectral_radiance_bb(wavs, temp, domain='wavelength'):
     
     Args:
         wavs (float or np.ndarray): Wavelength(s) in µm or frequency in Hz.
-        temp (float): Temperature of the black body in Kelvin.
+        temp (float or np.ndarray): Temperature(s) in K. Can have any shape.
         domain (str, optional): Domain of input ('wavelength' or 'frequency'). Defaults to 'wavelength'.
     
     Returns:
         float or np.ndarray: Spectral radiance in W/m²/µm/sr or Jy/sr.
     """
+    temp = np.asarray(temp)[..., None]  # Add wavelength dimension to any shape input
+    
     if domain == 'wavelength' or domain == 'wav':
         # Calculate spectral radiance in W/m²/µm/sr
         k1 = 1.1910439e8        # = 2hc^2 in (W/m²)µm^4
@@ -234,7 +141,7 @@ def calc_spectral_radiance_bb(wavs, temp, domain='wavelength'):
 
     return fact1 / (np.exp(fact2) - 1)
 
-def calc_blackbody_temp(star, dist):
+def calculate_blackbody_temp(star, dist):
     """
     Calculate temperature of a black body at given distance from star.
     Uses approximation T = 278.3 * sqrt(sqrt(L_star)) / sqrt(r)
@@ -249,7 +156,7 @@ def calc_blackbody_temp(star, dist):
     """
     return 278.3 * np.sqrt(np.sqrt(star.lum_suns)) / np.sqrt(dist)
 
-def calc_scatt_efficiency_coeffs(wavs, diam, matrl, refmed=1.0, qout=1, ism=False, type=None):
+def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1, type=None):
     """
     Calculates the scattering coefficients for particles of different sizes
     at given wavelengths and for a given dielectric function.
@@ -262,12 +169,8 @@ def calc_scatt_efficiency_coeffs(wavs, diam, matrl, refmed=1.0, qout=1, ism=Fals
         wavs (numpy.ndarray): Array of wavelengths (in µm) at which to calculate the scattering.
         diam (float): Diameter of the particle.
         matrl (Material): Object containing the dielectric properties and density of the grains.
-        refmed (float, optional): Refractive index of the surrounding medium relative to vacuum.
-                                  Defaults to 1.0. but can be adjusted for considering
-                                  scattering in mediums other than air or vacuum. 
         qout (int, optional): Determines the type of scattering coefficient to return:
                               1 for Qabs, 2 for Qpr, 3 for Qsca.
-        ism (bool, optional): Indicates if interstellar medium corrections need to be applied.
         type (optional): Additional type indicator for further specialized handling.
 
     Returns:
@@ -276,20 +179,6 @@ def calc_scatt_efficiency_coeffs(wavs, diam, matrl, refmed=1.0, qout=1, ism=Fals
     if not np.all(np.diff(wavs) > 0):
             raise ValueError("Wavelengths are not in ascending order. This must not happen.")
 
-    if ism:
-        q = np.ones_like(wavs)
-        # Q oc lambda^{-1.68} between 0.5 and 5 µm
-        k = np.where((wavs > 0.5) & (wavs < 5))
-        q[k] *= (wavs[k] / 0.5)**-1.68
-        q5 = (5 / 0.5)**-1.68
-        # Q oc lambda^{-1.06} between 5 and 250 µm
-        k = np.where((wavs > 5) & (wavs < 250))
-        q[k] *= q5 * (wavs[k] / 5.0)**-1.06
-        q250 = q5 * (250.0 / 5.0)**-1.06
-        k = np.where(wavs > 250)
-        q[k] *= q250 * (wavs[k] / 250.0)**-2.0
-        return q
-    
     # Interpolate the dielectric constants at the desired "wavs" values
     # Create masks for different wavelength ranges
     in_range = (wavs >= matrl.wavs[0]) & (wavs <= matrl.wavs[-1])
@@ -305,7 +194,7 @@ def calc_scatt_efficiency_coeffs(wavs, diam, matrl, refmed=1.0, qout=1, ism=Fals
 
     # Get the desired Qs for this particle
     q = np.ones_like(wavs)               # Default value is 1
-    x = np.pi * diam * refmed / wavs     # x is the "scattering parameter"
+    x = np.pi * diam * matrl.refmed / wavs     # x is the "scattering parameter"
     m = np.sqrt(dielec)                  # m is the refractive index of the material
     mx = np.abs(m) * x 
     mx1 = np.abs(m - 1) * x
@@ -318,22 +207,22 @@ def calc_scatt_efficiency_coeffs(wavs, diam, matrl, refmed=1.0, qout=1, ism=Fals
     # Apply Mie theory where wavelengths aren't small compared to particle size
     if np.any(mie_region):
         k = np.where(mie_region)[0]
-        q[k] = [calc_coeffs_mie_theory(x[i], m[i], n_ang=1, qout=qout) for i in k]
+        q[k] = [calculate_coeffs_mie_theory(x[i], m[i], n_ang=1, qout=qout) for i in k]
     
     # Apply Rayleigh-Gans theory where wavelengths are small compared to size and m~1
     if np.any(rayleigh_gans_region):
         k = np.where(rayleigh_gans_region)[0]
-        q[k] = calc_coeffs_rayleigh_gans(x[k], m[k], qout=qout)
+        q[k] = calculate_coeffs_rayleigh_gans(x[k], m[k], qout=qout)
     
     # Apply Geometric Optics where wavelengths are small compared to size and m not ~1
     if np.any(geometric_region):
         k = np.where(geometric_region)[0]
-        q[k] = calc_coeffs_geom_optics(np.real(m[k]), qout=qout)
+        q[k] = calculate_coeffs_geom_optics(np.real(m[k]), qout=qout)
 
     return q[0] if np.isscalar(wavs) else q
 
 @jit(nopython=True)
-def calc_coeffs_mie_theory(x, m, n_ang=1, qout=7):
+def calculate_coeffs_mie_theory(x, m, n_ang=1, qout=7):
     """
     Calculate optical coefficients using Mie theory (following Bohren & Huffman, 1998).
 
@@ -479,7 +368,7 @@ def calc_coeffs_mie_theory(x, m, n_ang=1, qout=7):
     # else: DOESN'T WORK WITH JIT COMPILER. RETURN TYPES MUST BE THE SAME IN ALL CASES
     #     return np.array([qabs, qpr, qsca, qext, qback, asymf])
 
-def calc_coeffs_rayleigh_gans(x, m, qout=1):
+def calculate_coeffs_rayleigh_gans(x, m, qout=1):
     """
     Calculates Qabs, Qpr, or Qsca for a particle using Rayleigh-Gans theory (BH158 and LD93).
 
@@ -501,7 +390,7 @@ def calc_coeffs_rayleigh_gans(x, m, qout=1):
     qpr = qabs + qsca / (1 + 0.3 * x2)
     return qpr
 
-def calc_coeffs_geom_optics(refreal, qout=1, n_step=1000):
+def calculate_coeffs_geom_optics(refreal, qout=1, n_step=1000):
     """
     Calculate either Qabs, Qpr, or Qsca for a particle using geometric optics.
 
@@ -564,125 +453,3 @@ def calc_coeffs_geom_optics(refreal, qout=1, n_step=1000):
         q -= q2
     
     return q
-
-def calc_spectral_radiances_for_all_temps(wavs, temps):
-    """
-    Calculates the BnuTDr array for given wavelengths and dust temperatures.
-
-    Args:
-        wavs (np.ndarray): Array of wavelengths in µm.
-        temps (np.ndarray): 2D array of temperatures in Kelvin, corresponding to
-                            different particle diameters and distances from the star.
-
-    Returns:
-        np.ndarray: 3D array of spectral radiance values (in Jy/sr), 
-                    indexed by wavelength, diameter, and distance.
-    """
-    nw, nD, nr = len(wavs), temps.shape[0], temps.shape[1]
-    dust_bnus = np.zeros((nw, nD, nr))
-
-    for iD in range(nD):
-        for ir in range(nr):
-            dust_bnus[:, iD, ir] = calc_spectral_radiance_bb(wavs, temps[iD, ir], domain='freq')
-
-    return dust_bnus
-
-def calc_beta_factors(diams, matrl, star, 
-              refmed=1.0, n_step=400, ism=None):
-    """
-    Calculates the beta values of dust particles around a star, which is the
-    ratio of radiation pressure force to gravitational force acting on them.
-
-    Args:
-        diams (numpy.ndarray): Array of diameters of dust particles in µm.
-        matrl (Material): Object containing the dielectric properties and density of the grains.
-        star (Star): Object holding the model input paramters of the central star.
-        refmed (float, optional): Reference medium parameters. Defaults to None.
-        ptrsspec (object, optional): Pointer to the stellar spectrum object. Defaults to None.
-        n_step (int, optional): Number of integration steps for calculating the spectrum. Defaults to 400.
-        ism (optional): Interstellar medium properties. Defaults to None.
-
-    Returns:
-        numpy.ndarray: An array of beta values for the given dust particles.
-    """
-    # Ensure diams is an array
-    diams = np.atleast_1d(diams)
-    
-    # Set the normalisation and integrate to find Ftstar
-    logwavtstar = get_logwav_integration_grid(star.temp, n_step)    # Set the wavelength range and number of integration steps
-    qbltemp = calc_spectral_flux_density(logwavtstar, star=star, qout=0)
-    ftstar = simpson(qbltemp, x=logwavtstar)
-    
-    # Initialize qpr_ftstar for averaging over stellar spectrum
-    qpr_ftstar = np.zeros_like(diams)
-    for i, diam in enumerate(diams):
-        qbltemp = calc_spectral_flux_density(logwavtstar, star=star, qout=2, diam=diam, 
-                           matrl=matrl, refmed=refmed, ism=ism)
-        qpr_ftstar[i] = simpson(qbltemp, x=logwavtstar)
-    
-    qprtstar = qpr_ftstar / ftstar  # Averaged Qpr over stellar spectrum
-    
-    # Constants and beta calculation
-    constant = 0.7652  # = (Lsun/(4*pi*c*G*Msun))*1e3 in (g/cm^3)µm, where
-                       # Lsun = 3.826e26 W, Msun = 1.989e30 kg, 
-                       # c = 2.997924580e8 m/s, G = 6.67259e-11 m^3/kg/s^2
-    betafacts = constant * (1.5 / (matrl.density * diams)) * (star.lum_suns / star.mass_suns)
-    betas = betafacts * qprtstar
-    
-    return betas
-
-def calc_blowout_diameters(matrl, star, beta_blow=0.5):
-    """
-    Returns the diameter range of grains that are blown out of the system by radiation pressure.
-    
-    Args:
-        matrl (Material): Object containing the dielectric properties and density of the grains.
-        star (Star): Object holding the model input paramters of the central star.
-        beta_blow (float): Threshold beta value for blowout.
-
-    Returns:
-        numpy.ndarray: A 2-element array containing the lower and upper diameter limits of dust grains blown out,
-                       or [None,None] if beta is always below the blowout limit.
-                       
-    """
-    # Define diameter range and compute logarithmic steps
-    diam1, diam2 = 0.01, 1000.  # in micrometers
-    ndiam = 20
-    diams = np.logspace(np.log10(diam1), np.log10(diam2), ndiam)
-
-    # Initial rough estimation of beta values
-    betas = calc_beta_factors(diams, matrl=matrl, star=star, n_step=20)
-
-    # Find indices where beta is greater than beta_blow
-    k = np.where(betas > beta_blow)[0]
-    if len(k) == 0:
-        return np.array(None, None)  # All beta < beta_blow
-
-    # Calculate accurate beta values for the diameter limits around the threshold
-    kup = k.max()
-    if kup < ndiam - 1:
-        diamlims = diams[kup:kup+2]
-    else:
-        diamlims = diams[-2:]       # If all beta>beta_blow, use last two values
-
-    betalims = calc_beta_factors(diamlims, matrl=matrl, star=star, n_step=200)
-    diamup = 10**np.interp(np.log10(beta_blow), np.log10(betalims[::-1]), np.log10(diamlims[::-1]))
-    betaup = calc_beta_factors(diamup, matrl=matrl, star=star, n_step=200)[0]
-    if not np.isclose(betaup, beta_blow, rtol=0.03):
-        warnings.warn(f"""Error or inaccuracy in calculating upper size limit.
-            Requested beta: {beta_blow}. Actual beta at the upper size limit: {betaup}.""", RuntimeWarning)
-
-    # Similar calculation for the lower limit, if applicable
-    if k.min() > 0:
-        diamlims = diams[k.min()-1:k.min()+1]
-        betalims = calc_beta_factors(diamlims, matrl=matrl, star=star, n_step=200)
-        diamlow = 10**np.interp(np.log10(beta_blow), np.log10(betalims), np.log10(diamlims))
-        betalow = calc_beta_factors(diamlow, matrl=matrl, star=star, n_step=200)[0]
-        if not np.isclose(betalow, beta_blow, rtol=0.03):
-            warnings.warn(f"""Error or inaccuracy in calculating lower size limit.
-                Requested beta: {beta_blow}. Actual beta at the lower size limit: {betalow}""", RuntimeWarning)
-    else:
-        diamlow = 0
-
-    return np.array([diamlow, diamup])
-

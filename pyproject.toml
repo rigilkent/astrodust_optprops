@@ -16,5 +16,6 @@ dependencies = [
     "numba",
     "astropy",
     "matplotlib",
+    "tqdm",
     "mkdocs"
 ]

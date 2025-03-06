@@ -164,8 +164,13 @@ cython_debug/
 
 # Ignore dated code
 /examples/Fomalhaut/make_fomalhaut_specfile.py
-/examples/Fomalhaut/phoenix_sol_modbb_disk_r_modbb_disk_r_.json
+/examples/*/*.json
+/examples/*/*.pkl
+/examples/*/*.png
 /src/optprops/legacy.py
+/src/optprops/core_legacy.py
+/src/optprops/classes_legacy.py
+/src/optprops/classes.py
 /src/optprops/material_data/*
 !/src/optprops/material_data/lg_amsil.dat
 !/src/optprops/material_data/lg_crsil.dat
