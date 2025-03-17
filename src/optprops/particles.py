@@ -2,6 +2,7 @@
 import numpy as np
 import warnings
 import astropy.constants as const
+import astropy.units as u
 import optprops.optics_core as core
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -9,7 +10,9 @@ from scipy.integrate import simpson
 from matplotlib.colors import LogNorm
 
 class Particles:
-    def __init__(self, diams, wavs, matrl, dists=None):
+    def __init__(self, diams, wavs, matrl, dists=None, 
+                 show_progress=True, precompute_Qs=True,
+                 suppress_mie_resonance=False, max_deviation=1):
         """Initialize Particles object.
         
         Args:
@@ -17,6 +20,10 @@ class Particles:
             wavs (array-like): Wavelengths in µm
             matrl (Material): Material object containing dust properties
             dists (array-like, optional): Distances from star in au. Required for temperature calculations.
+            show_progress (bool, optional): Whether to show progress bars for computations. Defaults to True.
+            precompute_Qs (bool, optional): Whether to precompute scattering coefficients. Defaults to True.
+            suppress_mie_resonance (bool, optional): Whether to suppress Mie resonances by averaging over nearby sizes. Defaults to False.
+            max_deviation (float, optional): Determines the diameter averaging window in Mie resonances suppression. Defaults to 1.
             
         Raises:
             ValueError: If any of the required parameters is None
@@ -24,10 +31,17 @@ class Particles:
         if any(x is None for x in [diams, wavs, matrl]):
             raise ValueError("diams, wavs, and matrl must be provided")
             
+        if hasattr(diams, 'unit'):
+            diams = diams.to('um').value
+        else:
+            print('Variable \'diams\' has no astropy.unit, assuming µm')
         self.diams = np.array(diams)
         self.wavs = np.array(wavs)
         self.matrl = matrl
         self.dists = np.array(dists) if dists is not None else None
+        self.cross_areas = np.pi * (self.diams/2)**2 * u.um**2
+        self.volumes = (4/3) * np.pi * (self.diams/2)**3 * u.um**3
+        self.masses = (self.volumes * (self.matrl.density * u.g / u.cm**3)).to(u.g)
 
         self.n_wavs = len(wavs)
         self.n_diams = len(diams)
@@ -41,12 +55,114 @@ class Particles:
         self.bnus = None
         self.diams_blow = None
 
-    def calculate_temperatures(self, star, show_progress=True):
+        self.show_progress = show_progress
+        self.suppress_mie_resonance = suppress_mie_resonance
+        self.max_deviation = max_deviation
+
+        # Add precomputation attributes
+        self.precompute_Qs = precompute_Qs
+        if self.precompute_Qs:
+            # Create broad wavelength grid for precomputation
+            self.precomputed_wavs = np.logspace(-1, 4, 1500) # >! 1500 for test to succeed
+            self._precompute_coefficients()
+
+    def _compute_coefficients_for_diameters(self, diameters):
+        """Helper method to compute raw Q coefficients for a set of diameters."""
+        Qabs = np.zeros((len(diameters), len(self.precomputed_wavs)))
+        Qpr = np.zeros_like(Qabs)
+        Qsca = np.zeros_like(Qabs)
+        
+        for i, diam in enumerate(tqdm(
+            diameters,
+            desc="Precomputing Q coefficients",
+            disable=not self.show_progress,
+            smoothing=0.1,
+            bar_format='{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]'
+        )):
+            Qabs[i] = core.calculate_scatt_efficiency_coeffs(
+                self.precomputed_wavs, diam, self.matrl, qout=1)
+            Qpr[i] = core.calculate_scatt_efficiency_coeffs(
+                self.precomputed_wavs, diam, self.matrl, qout=2)
+            Qsca[i] = core.calculate_scatt_efficiency_coeffs(
+                self.precomputed_wavs, diam, self.matrl, qout=3)
+        
+        return Qabs, Qpr, Qsca
+
+    def _precompute_coefficients(self):
+        """Initialize lookup tables for scattering coefficients.
+        
+        If suppression is enabled, computes coefficients on a fine diameter grid and averages 
+        within log-normal symmetric windows around requested diameters to reduce Mie resonances.
+        Otherwise, computes coefficients directly at requested diameters.
+        """
+        self.precomputed_Qabs = {}
+        self.precomputed_Qpr = {}
+        self.precomputed_Qsca = {}
+        
+        if self.suppress_mie_resonance:
+            # Create a fine logarithmic grid of diameters
+            min_diam = self.diams.min() / (1 + self.max_deviation)
+            max_diam = self.diams.max() * (1 + self.max_deviation)
+            points_per_decade = 150                 # No benefit above 150
+            n_decades = np.log10(max_diam) - np.log10(min_diam)
+            n_fine = int(points_per_decade * n_decades)
+            fine_diams = np.logspace(np.log10(min_diam), np.log10(max_diam), n_fine)
+            
+            # Compute coefficients on fine grid
+            fine_Qabs, fine_Qpr, fine_Qsca = self._compute_coefficients_for_diameters(fine_diams)
+            
+            # For each requested diameter, average over nearby grid points
+            for diam in self.diams:
+                # Define diameter window for averaging
+                diam_min = diam / (1 + self.max_deviation)
+                diam_max = diam * (1 + self.max_deviation)
+                mask = (fine_diams >= diam_min) & (fine_diams <= diam_max)
+                
+                # Average coefficients within window
+                self.precomputed_Qabs[diam] = np.mean(fine_Qabs[mask], axis=0)
+                self.precomputed_Qpr[diam] = np.mean(fine_Qpr[mask], axis=0)
+                self.precomputed_Qsca[diam] = np.mean(fine_Qsca[mask], axis=0)
+
+        else:
+            # If not suppressing, just compute at requested diameters
+            Qabs, Qpr, Qsca = self._compute_coefficients_for_diameters(self.diams)
+            for i, diam in enumerate(self.diams):
+                self.precomputed_Qabs[diam] = Qabs[i]
+                self.precomputed_Qpr[diam] = Qpr[i]
+                self.precomputed_Qsca[diam] = Qsca[i]
+
+    def get_Q_interpolator(self, diam, Q_type='abs'):
+        """Returns a function that interpolates Q coefficients at given wavelengths.
+        
+        Args:
+            diam (float): Particle diameter
+            Q_type (str): Type of coefficient ('abs', 'pr', or 'sca')
+        
+        Returns:
+            callable: Function that takes wavelength array and returns interpolated Q values
+        """
+        if not self.precompute_Qs:
+            return None
+            
+        Q_dict = {
+            'abs': self.precomputed_Qabs,
+            'pr': self.precomputed_Qpr,
+            'sca': self.precomputed_Qsca
+        }
+        
+        Q_values = Q_dict[Q_type][diam]
+        
+        def interpolator(wavs):
+            return np.interp(wavs, self.precomputed_wavs, Q_values, left=0, right=0)
+            
+        return interpolator
+
+    # @profile
+    def calculate_temperatures(self, star):
         """Calculate equilibrium temperatures for particles
         
         Args:
             star (Star): Star object containing stellar properties
-            show_progress (bool, optional): Whether to show progress bar. Defaults to True.
             
         Returns:
             numpy.ndarray: Array of temperatures for each particle diameter and distance
@@ -70,9 +186,11 @@ class Particles:
         # Calculate absorption efficiency averaged over stellar spectrum
         stellar_qabs = np.zeros(n_diams)
         for i, diam in enumerate(self.diams):
+            Q_interpolator = self.get_Q_interpolator(diam, 'abs') if self.precompute_Qs else None
             absorbed_qbl = core.calculate_spectral_flux_density(
                 star_logwavs, star=star, qout=1, 
-                diam=diam, matrl=self.matrl
+                diam=diam, matrl=self.matrl,
+                Q_interpolator=Q_interpolator
             )
             absorbed_flux = np.trapezoid(absorbed_qbl, star_logwavs)
             stellar_qabs[i] = absorbed_flux / total_star_flux
@@ -82,7 +200,7 @@ class Particles:
             enumerate(self.dists),
             total=len(self.dists),
             desc="Calculating dust temperatures",
-            disable=not show_progress,
+            disable=not self.show_progress,
             smoothing=0.1,
             bar_format='{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]'
         )
@@ -92,17 +210,19 @@ class Particles:
                 # Use temperature of previous particle diameter at same distance as initial guess
                 temp_guess = temps_bb[dist_idx] if diam_idx == 0 else self.temps[dist_idx, diam_idx-1]
 
+                Q_interpolator = self.get_Q_interpolator(diam, 'abs') if self.precompute_Qs else None
                 temp_equil = self._calculate_equilibrium_temp(
                     diam=diam, dist=dist, temp_bb=temps_bb[dist_idx],
                     stellar_qabs=stellar_qabs[diam_idx], star=star,
-                    initial_guess=temp_guess
+                    initial_guess=temp_guess, Q_interpolator=Q_interpolator
                 )
                 self.temps[dist_idx, diam_idx] = temp_equil
         
         return self.temps
 
     def _calculate_equilibrium_temp(self, diam, dist, temp_bb, stellar_qabs, star,
-                                  initial_guess=100, max_iterations=100, tolerance=0.001):
+                                  initial_guess=100, max_iterations=100, tolerance=0.001, 
+                                  Q_interpolator=None):
         """Calculate equilibrium temperature for a single particle.
         
         Args:
@@ -114,6 +234,7 @@ class Particles:
             initial_guess (float): Initial temperature guess. Defaults to 100 K.
             max_iterations (int, optional): Maximum number of iterations. Defaults to 100.
             tolerance (float, optional): Convergence tolerance. Defaults to 0.001.
+            Q_interpolator (callable, optional): Function that interpolates Qabs at given wavelengths.
             
         Returns:
             float: Equilibrium temperature in Kelvin
@@ -131,7 +252,7 @@ class Particles:
             # Calculate absorption averaged over emission spectrum
             emitted_qbl = core.calculate_spectral_flux_density(
                 curr_logwavs, temp=curr_temp, qout=1,
-                diam=diam, matrl=self.matrl
+                diam=diam, matrl=self.matrl, Q_interpolator=Q_interpolator
             )
             emitted_flux = np.trapezoid(emitted_qbl, curr_logwavs)
             curr_qabs = emitted_flux / bb_flux
@@ -163,18 +284,21 @@ class Particles:
 
     def calculate_scattering_properties(self):
         """Calculate Qabs, Qpr, and Qsca for the particles"""
-        self.Qabs = np.array([
-            core.calculate_scatt_efficiency_coeffs(self.wavs, d, matrl=self.matrl) 
-            for d in self.diams
-        ])
-        self.Qpr = np.array([
-            core.calculate_scatt_efficiency_coeffs(self.wavs, d, matrl=self.matrl, qout=2) 
-            for d in self.diams
-        ])
-        self.Qsca = np.array([
-            core.calculate_scatt_efficiency_coeffs(self.wavs, d, matrl=self.matrl, qout=3) 
-            for d in self.diams
-        ])
+        self.Qabs = np.zeros((len(self.diams), len(self.wavs)))
+        self.Qpr = np.zeros_like(self.Qabs)
+        self.Qsca = np.zeros_like(self.Qabs)
+
+        for i, diam in enumerate(self.diams):
+            if self.precompute_Qs:
+                # Use precomputed values via interpolation
+                self.Qabs[i] = self.get_Q_interpolator(diam, 'abs')(self.wavs)
+                self.Qpr[i] = self.get_Q_interpolator(diam, 'pr')(self.wavs)
+                self.Qsca[i] = self.get_Q_interpolator(diam, 'sca')(self.wavs)
+            else:
+                # Calculate directly
+                self.Qabs[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl)
+                self.Qpr[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl, qout=2)
+                self.Qsca[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl, qout=3)
         
         return self.Qabs, self.Qpr, self.Qsca
 
@@ -306,19 +430,17 @@ class Particles:
             
         return diams_blow
 
-    def calculate_all(self, star, show_progress=True):
+    def calculate_all(self, star):
         """Calculate all optical properties
         
         Args:
             star (Star): Star object containing stellar properties
-            show_progress (bool, optional): Whether to show progress bar for temperature calculation.
-                Defaults to True.
         """
         if self.dists is None:
             raise ValueError("Distances (dists) must be set to compute all properties")
             
         self.calculate_scattering_properties()
-        self.calculate_temperatures(star, show_progress=show_progress)
+        self.calculate_temperatures(star)
         self.calculate_beta_factors(star)
         self.calculate_blowout_diameters(star)
         self.bnus = self.calculate_spectral_radiance_bb(self.wavs, self.temps)
@@ -340,6 +462,29 @@ class Particles:
             numpy.ndarray: Spectral radiance in specified domain units
         """
         return core.calculate_spectral_radiance_bb(wavs, temps, domain=domain)
+
+    def interpolate_temperatures(self, target_distances):
+        """Interpolates temperatures for particles based on radial distances.
+
+        Args:
+            target_distances: Contains the astocentric distances (in au) where temperatures
+                              should be interpolated to. Must be a 1D array of distances.
+
+        Sets:
+            self.temps with interpolated temperature array of shape (rbin.num, self.n_diams).
+
+        Note:
+            Original temperature data comes from self._optprops_prtl which must have
+              'dists' (distances in au) and 'temps' attributes
+        """
+        if self.temps is None:
+            raise ValueError("Temperatures have not been calculated. Run calculate_temperatures() first.")
+        
+        log_target_temps = np.zeros((len(target_distances), self.n_diams))
+        for iD in range(self.n_diams):          # interpolate in log space
+            log_target_temps[:, iD] = np.interp(np.log10(target_distances), np.log10(self.dists), np.log10(self.temps[:, iD]))
+        target_temps = 10**log_target_temps     # return to lin space
+        return target_temps
 
     def plot_Qabs(self, ax=None, diams=None, as_contour=False, n_contour_levels=100, add_contour_lines=[.1, 1]):
         """Plot absorption efficiency (Qabs) as function of wavelength.
@@ -386,14 +531,14 @@ class Particles:
         else:
             ax.hlines(1, xmin=0, xmax=1e4, linestyle='--', linewidth=.8, color='black', alpha=.5)
             if diams is None:
-                diams = np.array([10, 30, 100, 300, 1000])
+                diams = np.logspace(.5,3,6)
             diams = diams[np.logical_and(diams >= self.diams.min(), diams <= self.diams.max())]
             # Create color progression using a colormap
             colors = plt.cm.winter(np.linspace(0, 1, len(diams)))
             for diam, color in zip(diams, colors):
                 idx = np.argmin(np.abs(self.diams - diam))
-                ax.loglog(self.wavs, self.Qabs[idx, :], label=f'{self.diams[idx]:.0f} µm', color=color)
-            ax.legend(title="Particle diameters:")
+                ax.loglog(self.wavs, self.Qabs[idx, :], label=f'{self.diams[idx]:.0f} µm', color=color, zorder=self.n_diams-idx)
+            ax.legend(title="Particle diameters:", loc='lower left')
             ax.set_ylabel(r'$Q_\mathrm{abs}$', fontsize=12)
             ax.set_ylim(1e-2, 2)
             ax.set_xlim(self.wavs.min(), self.wavs.max())
@@ -461,7 +606,7 @@ class Particles:
                                 levels=np.linspace(clim[0], clim[1], n_contour_levels))
 
         cbar = plt.colorbar(contour, ax=ax, label='Temperature (K)', pad=.01)
-        cbar.set_ticks([tick for tick in np.linspace(0, 10e3, 201) if clim[0] <= tick <= clim[1]])
+        cbar.set_ticks([tick for tick in np.linspace(0, 10e3, 51) if clim[0] <= tick <= clim[1]])
         cbar.ax.set_ylabel(cbar.ax.get_ylabel(), fontsize=11)
         if add_contour_lines is not None:
             contour_lines = ax.contour(self.dists, self.diams, self.temps.T, levels=add_contour_lines, 

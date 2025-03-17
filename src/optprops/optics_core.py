@@ -25,7 +25,7 @@ def get_logwav_integration_grid(temperature, n_step=400):
 
     return logwavs
 
-def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None, matrl=None):
+def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None, matrl=None, Q_interpolator=None):
     """
     Calculate Q*π*Bλ*λ*ln(10), the efficiency-weighted spectral flux density
     adjusted to allow integration over log(wavelength) to get total flux.
@@ -41,6 +41,8 @@ def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=
         qout (int, optional): Output type. 0 for Q=1.0, 1 for Qabs, 2 for Qpr. Default is 0.
         diam (float, optional): Diameter of the particle.
         matrl (Material, optional): Material object containing the material properties. Required if qout != 0.
+        Q_interpolator (callable, optional): Function that takes wavelength array and returns Q coefficients.
+                                           If provided, used instead of calculating coefficients directly.
 
     Returns:
         numpy.ndarray: The calculated Q*pi*Blambda*lambda*ln(10) values.
@@ -78,8 +80,13 @@ def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=
     if qout == 0:
         return flux_for_log_integration
     else:
-        return flux_for_log_integration * calculate_scatt_efficiency_coeffs(wavs, diam, 
-                                          qout=qout, matrl=matrl)
+        # Use interpolator if available, otherwise calculate directly
+        if Q_interpolator is not None:
+            Q = Q_interpolator(wavs)
+        else:
+            Q = calculate_scatt_efficiency_coeffs(wavs, diam, qout=qout, matrl=matrl)
+        
+        return flux_for_log_integration * Q
 
 def calculate_spectral_flux_density_bb(wavs, temp):
     """
@@ -102,7 +109,7 @@ def calc_spectral_flux_density_bb(wavs, temp):
     """
     Wrapper needed for old optmod files. (Runs v40s)
     """
-    return self.calculate_spectral_flux_density_bb(wavs, temp)
+    return calculate_spectral_flux_density_bb(wavs, temp)
 
 def calculate_spectral_radiance_bb(wavs, temp, domain='wavelength'):
     """
@@ -117,18 +124,18 @@ def calculate_spectral_radiance_bb(wavs, temp, domain='wavelength'):
     Args:
         wavs (float or np.ndarray): Wavelength(s) in µm or frequency in Hz.
         temp (float or np.ndarray): Temperature(s) in K. Can have any shape.
-        domain (str, optional): Domain of input ('wavelength' or 'frequency'). Defaults to 'wavelength'.
+        domain (str, optional): Domain of output ('wavelength' or 'frequency'). Defaults to 'wavelength'.
     
     Returns:
         float or np.ndarray: Spectral radiance in W/m²/µm/sr or Jy/sr.
     """
     temp = np.asarray(temp)[..., None]  # Add wavelength dimension to any shape input
     
-    if domain == 'wavelength' or domain == 'wav':
+    if domain[0:3] == 'wav':
         # Calculate spectral radiance in W/m²/µm/sr
         k1 = 1.1910439e8        # = 2hc^2 in (W/m²)µm^4
         fact1 = k1 / wavs**5
-    elif domain == 'frequency' or domain == 'freq':
+    elif domain[0:4] == 'freq':
         # Calculate spectral radiance in Jy/sr
         k1 = 3.9728949e+19      # = 2hc in Jy*µm^3
         fact1 = k1 / wavs**3
@@ -156,7 +163,7 @@ def calculate_blackbody_temp(star, dist):
     """
     return 278.3 * np.sqrt(np.sqrt(star.lum_suns)) / np.sqrt(dist)
 
-def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1, type=None):
+def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1):
     """
     Calculates the scattering coefficients for particles of different sizes
     at given wavelengths and for a given dielectric function.
@@ -171,7 +178,6 @@ def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1, type=None):
         matrl (Material): Object containing the dielectric properties and density of the grains.
         qout (int, optional): Determines the type of scattering coefficient to return:
                               1 for Qabs, 2 for Qpr, 3 for Qsca.
-        type (optional): Additional type indicator for further specialized handling.
 
     Returns:
         numpy.ndarray: Array of scattering coefficients corresponding to the input wavelengths.

@@ -30,9 +30,9 @@ def test_consistency_with_legacy_idl(star_name, lstar, tstar, mstar, spec_file, 
     # Load the appropriate expected outputs
     idl_outputs = readsav(tests_dir / idl_outputs_file)
     expected_temps = idl_outputs.temps.astype('float64')        # n_dists x n_diams
-    expected_Qabs = idl_outputs.Qabs.astype('float64')          # n_wavs x n_diams
-    expected_Qpr = idl_outputs.Qpr.astype('float64')            # n_wavs x n_diams
-    expected_Qsca = idl_outputs.Qsca.astype('float64')          # n_wavs x n_diams
+    expected_Qabs = idl_outputs.Qabs.astype('float64')          # n_diams x n_wavs
+    expected_Qpr = idl_outputs.Qpr.astype('float64')            # n_diams x n_wavs
+    expected_Qsca = idl_outputs.Qsca.astype('float64')          # n_diams x n_wavs
     expected_betas = idl_outputs.betas.astype('float64')        # n_diams
     expected_diam_bl = idl_outputs.diam_bl.astype('float64')
     expected_bnus = idl_outputs.bnus.astype('float64')          # n_dists x n_diams x n_wavs

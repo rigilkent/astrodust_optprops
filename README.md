@@ -33,7 +33,7 @@ star = opt.Star(name='Fomalhaut', lum_suns=16.6, mass_suns=1.92, temp=8500)
 # Create a material object
 matrl = opt.Material(...)
 
-# Define wavelengths, particles diameters, and distances to the star
+# Define wavelengths, particles diameters, and their distances to the star
 wavs = [...]
 diams = [...]
 dists = [...]
