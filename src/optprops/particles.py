@@ -6,7 +6,6 @@ import astropy.units as u
 import optprops.optics_core as core
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from scipy.integrate import simpson
 from matplotlib.colors import LogNorm
 
 class Particles:
@@ -58,12 +57,17 @@ class Particles:
         self.show_progress = show_progress
         self.suppress_mie_resonance = suppress_mie_resonance
         self.max_deviation = max_deviation
-
-        # Add precomputation attributes
         self.precompute_Qs = precompute_Qs
+
+        if self.suppress_mie_resonance and not self.precompute_Qs:
+            warnings.warn("Mie resonance suppression requires precomputed Q coefficients. "
+                          "Setting precompute_Qs=True.", UserWarning)
+            self.precompute_Qs = True
+
+        # Optional: precomputation of coefficients (faster for if num(dists) high; needed for resoannce suppression)
         if self.precompute_Qs:
             # Create broad wavelength grid for precomputation
-            self.precomputed_wavs = np.logspace(-1, 4, 1500) # >! 1500 for test to succeed
+            self.precomputed_wavs = np.logspace(-1, 4, 1500) # >= 1500 for test to succeed
             self._precompute_coefficients()
 
     def _compute_coefficients_for_diameters(self, diameters):
@@ -76,15 +80,13 @@ class Particles:
             diameters,
             desc="Precomputing Q coefficients",
             disable=not self.show_progress,
-            smoothing=0.1,
+            smoothing=.7,
             bar_format='{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]'
         )):
-            Qabs[i] = core.calculate_scatt_efficiency_coeffs(
-                self.precomputed_wavs, diam, self.matrl, qout=1)
-            Qpr[i] = core.calculate_scatt_efficiency_coeffs(
-                self.precomputed_wavs, diam, self.matrl, qout=2)
-            Qsca[i] = core.calculate_scatt_efficiency_coeffs(
-                self.precomputed_wavs, diam, self.matrl, qout=3)
+            Qs = core.calculate_scatt_efficiency_coeffs(self.precomputed_wavs, diam, self.matrl)
+            Qabs[i] = Qs['abs']
+            Qpr[i] = Qs['pr']
+            Qsca[i] = Qs['sca']
         
         return Qabs, Qpr, Qsca
 
@@ -140,6 +142,10 @@ class Particles:
         
         Returns:
             callable: Function that takes wavelength array and returns interpolated Q values
+        
+        Note:
+            Uses logarithmic interpolation to handle large variations in Q values
+            while ensuring they remain positive.
         """
         if not self.precompute_Qs:
             return None
@@ -150,10 +156,45 @@ class Particles:
             'sca': self.precomputed_Qsca
         }
         
-        Q_values = Q_dict[Q_type][diam]
-        
+        Q_type = Q_type.lower()
+        if diam in self.diams:
+            # Direct lookup if diameter exists
+            Q_values = Q_dict[Q_type][diam]
+        else:
+            # Find nearest diameters and interpolate Q values
+            idx = np.searchsorted(self.diams, diam)
+            if idx == 0:
+                # Extrapolate below smallest diameter
+                d1, d2 = self.diams[0], self.diams[1]
+            elif idx == len(self.diams):
+                # Extrapolate above largest diameter
+                d1, d2 = self.diams[-2], self.diams[-1]
+            else:
+                # Interpolate between two diameters
+                d1, d2 = self.diams[idx-1], self.diams[idx]
+                
+            # Log-space interpolation weight
+            log_d = np.log10(diam)
+            log_d1 = np.log10(d1)
+            log_d2 = np.log10(d2)
+            w = (log_d - log_d1) / (log_d2 - log_d1)
+            
+            # Get Q values and handle zeros/negatives before taking log
+            Q1 = np.maximum(Q_dict[Q_type][d1], 1e-30)
+            Q2 = np.maximum(Q_dict[Q_type][d2], 1e-30)
+            
+            # Interpolate in log space
+            log_Q = (1 - w) * np.log10(Q1) + w * np.log10(Q2)
+            Q_values = 10.0**log_Q
+
         def interpolator(wavs):
-            return np.interp(wavs, self.precomputed_wavs, Q_values, left=0, right=0)
+            # Log interpolation in wavelength dimension
+            return 10.0**np.interp(
+                np.log10(wavs),
+                np.log10(self.precomputed_wavs),
+                np.log10(np.maximum(Q_values, 1e-30)),
+                left=-30, right=-30  # Will become 1e-30 after 10**
+            )
             
         return interpolator
 
@@ -176,8 +217,8 @@ class Particles:
 
         # Pre-calculate stellar spectrum quantities
         star_logwavs = core.get_logwav_integration_grid(star.temp)    
-        star_flux = core.calculate_spectral_flux_density(star_logwavs, star=star, qout=0)
-        total_star_flux = np.trapezoid(star_flux, star_logwavs)
+        star_flux = core.calculate_spectral_flux_density(star_logwavs, star=star)
+        total_star_flux = core.integrate_log_spectrum(star_flux, star_logwavs)
         
         # Calculate blackbody temperatures at each distance as initial guesses
         temps_bb = np.array([core.calculate_blackbody_temp(star=star, dist=dist) 
@@ -187,13 +228,13 @@ class Particles:
         stellar_qabs = np.zeros(n_diams)
         for i, diam in enumerate(self.diams):
             Q_interpolator = self.get_Q_interpolator(diam, 'abs') if self.precompute_Qs else None
-            absorbed_qbl = core.calculate_spectral_flux_density(
-                star_logwavs, star=star, qout=1, 
+            absorbed_flux = core.calculate_spectral_flux_density(
+                star_logwavs, star=star, Q_type='abs', 
                 diam=diam, matrl=self.matrl,
                 Q_interpolator=Q_interpolator
             )
-            absorbed_flux = np.trapezoid(absorbed_qbl, star_logwavs)
-            stellar_qabs[i] = absorbed_flux / total_star_flux
+            total_absorbed_flux = core.integrate_log_spectrum(absorbed_flux, star_logwavs)
+            stellar_qabs[i] = total_absorbed_flux / total_star_flux
 
         # Calculate temperatures for each distance and diameter
         distance_iter = tqdm(
@@ -250,12 +291,12 @@ class Particles:
             curr_logwavs = core.get_logwav_integration_grid(curr_temp)
             
             # Calculate absorption averaged over emission spectrum
-            emitted_qbl = core.calculate_spectral_flux_density(
-                curr_logwavs, temp=curr_temp, qout=1,
+            emitted_flux = core.calculate_spectral_flux_density(
+                curr_logwavs, temp=curr_temp, Q_type='abs',
                 diam=diam, matrl=self.matrl, Q_interpolator=Q_interpolator
             )
-            emitted_flux = np.trapezoid(emitted_qbl, curr_logwavs)
-            curr_qabs = emitted_flux / bb_flux
+            total_emitted_flux = core.integrate_log_spectrum(emitted_flux, curr_logwavs)
+            curr_qabs = total_emitted_flux / bb_flux
 
             # Calculate temperature difference
             target_temp = temp_bb * np.sqrt(np.sqrt(stellar_qabs / curr_qabs))
@@ -296,9 +337,10 @@ class Particles:
                 self.Qsca[i] = self.get_Q_interpolator(diam, 'sca')(self.wavs)
             else:
                 # Calculate directly
-                self.Qabs[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl)
-                self.Qpr[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl, qout=2)
-                self.Qsca[i] = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl, qout=3)
+                Qs = core.calculate_scatt_efficiency_coeffs(self.wavs, diam, matrl=self.matrl)
+                self.Qabs[i] = Qs['abs']
+                self.Qpr[i] = Qs['pr']
+                self.Qsca[i] = Qs['sca']
         
         return self.Qabs, self.Qpr, self.Qsca
 
@@ -320,30 +362,31 @@ class Particles:
         diams_to_use = np.atleast_1d(diams) if diams is not None else self.diams
         
         logwavs = core.get_logwav_integration_grid(star.temp, n_step=n_step)
-        qpr_ftstar = np.zeros_like(diams_to_use)
         
         # Calculate total stellar flux
-        ftstar = simpson(
-            core.calculate_spectral_flux_density(logwavs, star=star, qout=0), x=logwavs
-        )
+        star_flux = core.calculate_spectral_flux_density(logwavs, star=star)
+        star_flux_tot = core.integrate_log_spectrum(flux=star_flux, logwavs=logwavs)
 
         # Calculate Qpr averaged over stellar spectrum
+        qpr_star_flux_tot = np.zeros_like(diams_to_use)
         for i, diam in enumerate(diams_to_use):
-            qpr_flux = core.calculate_spectral_flux_density(
-                logwavs, star=star, qout=2,
-                diam=diam, matrl=self.matrl
+            Q_interpolator = self.get_Q_interpolator(diam, 'pr') if self.precompute_Qs else None
+            qpr_star_flux = core.calculate_spectral_flux_density(
+                logwavs, star=star, Q_type='pr',
+                diam=diam, matrl=self.matrl, 
+                Q_interpolator=Q_interpolator
             )
-            qpr_ftstar[i] = simpson(qpr_flux, x=logwavs)
-
-        qpr_tstar = qpr_ftstar / ftstar  # Averaged Qpr over stellar spectrum
+            qpr_star_flux_tot[i] = core.integrate_log_spectrum(flux=qpr_star_flux, logwavs=logwavs)
+        
+        effective_qpr = qpr_star_flux_tot / star_flux_tot
 
         # Calculate beta factors
-        constant = 0.7652  # = (Lsun/(4*pi*c*G*Msun))*1e3 in (g/cm^3)µm, where
-                       # Lsun = 3.826e26 W, Msun = 1.989e30 kg, 
-                       # c = 2.997924580e8 m/s, G = 6.67259e-11 m^3/kg/s^2
+        constant = 0.7652   # = (Lsun/(4*pi*c*G*Msun))*1e3 in (g/cm^3)µm, where
+                            # Lsun = 3.826e26 W, Msun = 1.989e30 kg, 
+                            # c = 2.997924580e8 m/s, G = 6.67259e-11 m^3/kg/s^2
         betafacts = constant * (1.5 / (self.matrl.density * diams_to_use)) * \
                     (star.lum_suns / star.mass_suns)
-        betas = betafacts * qpr_tstar
+        betas = betafacts * effective_qpr
         
         # Only store results if using self.diams
         if diams is None:
@@ -351,7 +394,7 @@ class Particles:
 
         # Return scalar if input was scalar
         if input_was_scalar:
-            betas = betas[0]
+            return betas[0]
             
         return betas
 
@@ -538,7 +581,7 @@ class Particles:
             for diam, color in zip(diams, colors):
                 idx = np.argmin(np.abs(self.diams - diam))
                 ax.loglog(self.wavs, self.Qabs[idx, :], label=f'{self.diams[idx]:.0f} µm', color=color, zorder=self.n_diams-idx)
-            ax.legend(title="Particle diameters:", loc='lower left')
+            ax.legend(title="Particle diameters:", loc='lower left', framealpha=1)
             ax.set_ylabel(r'$Q_\mathrm{abs}$', fontsize=12)
             ax.set_ylim(1e-2, 2)
             ax.set_xlim(self.wavs.min(), self.wavs.max())

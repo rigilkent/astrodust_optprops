@@ -1,7 +1,6 @@
 from pathlib import Path
 import numpy as np
 import optprops as opt
-import time
 
 script_dir = Path(__file__).parent
 
@@ -24,9 +23,8 @@ prtl = opt.Particles(diams=diams, wavs=wavs, dists=dists,
 prtl.calculate_all(star)
 
 # --------------------------- Save complete state --------------------------------
-model = opt.OpticalModel(star=star, prtl=prtl)
-model.save(script_dir / 'fomalhaut_results.pkl')
-
+# model = opt.OpticalModel(star=star, prtl=prtl)
+# model.save(script_dir / 'fomalhaut_results.pkl')
 
 
 # ----------------------------- Later, load and use: -------------------------------

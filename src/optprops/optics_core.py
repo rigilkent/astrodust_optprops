@@ -1,19 +1,17 @@
 import numpy as np
-import astropy.constants as const
-from scipy.integrate import simpson
 from numba import jit
 
 
 def get_logwav_integration_grid(temperature, n_step=400):
     """
-    Returns an array of log10(lambda) over the wavelength range a blackbody spectrum 
+    Returns an array of log10(λ) over the wavelength range a blackbody spectrum 
     of a given temperature should be integrated.
 
     Args:
         temperature (float): The temperature of the blackbody in Kelvin.
         n_step (int, optional): The number of steps in the wavelength range. Defaults to 400.
     Returns:
-        numpy.ndarray: An array of log10(lambda) values over the specified wavelength range.
+        np.ndarray: An array of log10(λ) values over the specified wavelength range.
     """
     if temperature <= 0:
         raise ValueError("Temperature must be greater than 0 K")
@@ -25,42 +23,40 @@ def get_logwav_integration_grid(temperature, n_step=400):
 
     return logwavs
 
-def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=None, matrl=None, Q_interpolator=None):
+def calculate_spectral_flux_density(logwavs, temp=None, star=None, diam=None, 
+                                    Q_interpolator=None, Q_type=None, matrl=None):
     """
-    Calculate Q*π*Bλ*λ*ln(10), the efficiency-weighted spectral flux density
-    adjusted to allow integration over log(wavelength) to get total flux.
+    Calculate Q*π*B_λ, the efficiency-weighted spectral flux density.
+
     Product includes:
-    - Q: Scattering/absorption efficiency
-    - π*Bλ: Blackbody spectral flux density (=Fλ) 
-    - λ*ln(10): Conversion factor to enable integration over dlog(λ) rather than dλ
+    - Q: Scattering/absorption/pr efficiency
+    - π*B_λ: Blackbody spectral flux density (=F_λ) 
 
     Args:
         logwavs (float or array-like): Logarithm (base 10) of the wavelength(s).
         temp (float, optional): Temperature of the black body. Either 'temp' or 'star' must be provided.
         star (Star, optional): Star object containing the star's properties. Either 'temp' or 'star' must be provided.
-        qout (int, optional): Output type. 0 for Q=1.0, 1 for Qabs, 2 for Qpr. Default is 0.
         diam (float, optional): Diameter of the particle.
-        matrl (Material, optional): Material object containing the material properties. Required if qout != 0.
         Q_interpolator (callable, optional): Function that takes wavelength array and returns Q coefficients.
                                            If provided, used instead of calculating coefficients directly.
+        Q_type (str or None, optional): Type of coefficient. One of:
+            None: returns unmodified flux (Q=1.0)
+            'abs': returns absorption-weighted flux
+            'pr': returns radiation pressure-weighted flux
+            'sca': returns scattering-weighted flux
+        matrl (Material, optional): Material object containing the material properties. Required if Q_type != 'abs'.
 
     Returns:
-        numpy.ndarray: The calculated Q*pi*Blambda*lambda*ln(10) values.
-
-    Raises:
-        ValueError: If both 'temp' and 'star' are None, or if 'qout' is not 0 and 'matrl' is None.
+        np.ndarray: The calculated Q*pi*B_λ values.
 
     Note:
-        The factor "pi" converts spectral radiance, Blambda (W/m^2/µm/sr), into spectral flux density, Flambda (W/m^2/µm).
-        The factor "lambda*ln(10)" allows integration of Flambda over dlog(lambda) rather than dlambda.
-        One test is: ftstar = int_tabulated(logwavs, calculate_spectral_flux_density(logwavs, tint=t, qint=0)) = s*t^4,
-        where s = 5.67051e-8 W/m^2/K^4 is the Stefan-Boltzmann constant.
+        The factor "pi" converts spectral radiance, B_λ (W/m^2/µm/sr), into spec. flux density, F_λ (W/m^2/µm).
     """
 
     if temp is None and star is None:
         raise ValueError("Either 'temp' or 'star' must be provided.")
-    if qout != 0 and matrl is None:
-        raise ValueError("When 'qout' is not 0, 'matrl' must be provided.")
+    if Q_interpolator is None and matrl is None and Q_type is not None:
+        raise ValueError("If 'Q_interpolator' is not provided, 'matrl' AND 'Q_type' must be provided.")
 
     wavs = 10.0**logwavs
     
@@ -74,26 +70,36 @@ def calculate_spectral_flux_density(logwavs, temp=None, star=None, qout=0, diam=
         log_flux[np.isinf(log_flux)] = -50.0
         flux = 10.0**log_flux        
         
-    # This adjustment allows integration over dlog(lambda) rather than dlambda
-    flux_for_log_integration = flux * wavs * np.log(10.0)
-        
-    if qout == 0:
-        return flux_for_log_integration
+    if Q_interpolator is not None:              # Use interpolator if available
+        return flux * Q_interpolator(wavs)
+    elif Q_type is not None:                    # Otherwise calculate directly
+        return flux * calculate_scatt_efficiency_coeffs(wavs, diam, matrl=matrl)[Q_type]
     else:
-        # Use interpolator if available, otherwise calculate directly
-        if Q_interpolator is not None:
-            Q = Q_interpolator(wavs)
-        else:
-            Q = calculate_scatt_efficiency_coeffs(wavs, diam, qout=qout, matrl=matrl)
+        return flux
+
+def integrate_log_spectrum(flux, logwavs):
+    """Integrate a spectrum over log wavelength space.
+    
+    Args:
+        logwavs (array-like): Log10 of wavelengths
+        flux (array-like): Spectral flux density at each wavelength
         
-        return flux_for_log_integration * Q
+    Returns:
+        float: Integrated flux
+        
+    Note:
+        When integrating F_λ over d(log λ), need to multiply by λ*ln(10)
+        because d(log λ)/dλ = 1/(λ*ln(10)).    
+    """
+    wavs = 10.0**logwavs
+    return np.trapezoid(flux * wavs * np.log(10.0), x=logwavs)
 
 def calculate_spectral_flux_density_bb(wavs, temp):
     """
     Calculate the spectral flux density, Fλ=π*Bλ, of a black body at a given temperature.
 
-    This function computes the spectral radiance (B_lambda) and converts it to 
-    spectral flux density (F_lambda) by multiplying with π, which effectively integrates
+    This function computes the spectral radiance (B_λ) and converts it to 
+    spectral flux density (F_λ) by multiplying with π, which effectively integrates
     the radiance over a hemisphere (assuming isotropic and Lambertian emission).
 
     Args:
@@ -163,24 +169,23 @@ def calculate_blackbody_temp(star, dist):
     """
     return 278.3 * np.sqrt(np.sqrt(star.lum_suns)) / np.sqrt(dist)
 
-def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1):
+def calculate_scatt_efficiency_coeffs(wavs, diam, matrl):
     """
     Calculates the scattering coefficients for particles of different sizes
     at given wavelengths and for a given dielectric function.
     Uses Mie theory, Rayleigh-Gans theory, or Geometric Optics, 
     depending on the conditions.
-    Returns Qabs (qout=1), or Qpr (qout=2), or Qsca (qout=3, 
-    though this doesn't work for geometric optics yet).
 
     Args:
-        wavs (numpy.ndarray): Array of wavelengths (in µm) at which to calculate the scattering.
+        wavs (np.ndarray): Array of wavelengths (in µm) at which to calculate the scattering.
         diam (float): Diameter of the particle.
         matrl (Material): Object containing the dielectric properties and density of the grains.
-        qout (int, optional): Determines the type of scattering coefficient to return:
-                              1 for Qabs, 2 for Qpr, 3 for Qsca.
 
     Returns:
-        numpy.ndarray: Array of scattering coefficients corresponding to the input wavelengths.
+        dict: Dictionary containing all coefficients with keys:
+            'abs': absorption efficiency
+            'pr': radiation pressure efficiency
+            'sca': scattering efficiency
     """
     if not np.all(np.diff(wavs) > 0):
             raise ValueError("Wavelengths are not in ascending order. This must not happen.")
@@ -198,10 +203,12 @@ def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1):
     # wav below smallest matrl.wavs --> assume eps does not change much from closest tabulation
     dielec[too_short] = matrl.eps[0]
 
-    # Get the desired Qs for this particle
-    q = np.ones_like(wavs)               # Default value is 1
-    x = np.pi * diam * matrl.refmed / wavs     # x is the "scattering parameter"
-    m = np.sqrt(dielec)                  # m is the refractive index of the material
+    # Get all Qs for this particle
+    qabs = np.ones_like(wavs)
+    qpr = np.ones_like(wavs)
+    qsca = np.ones_like(wavs)
+    x = np.pi * diam * matrl.refmed / wavs
+    m = np.sqrt(dielec)
     mx = np.abs(m) * x 
     mx1 = np.abs(m - 1) * x
     
@@ -210,41 +217,41 @@ def calculate_scatt_efficiency_coeffs(wavs, diam, matrl, qout=1):
     rayleigh_gans_region = (mx > 1000.0) & (mx1 <= 0.001)
     geometric_region = (mx > 1000.0) & (mx1 > 0.001) & (wavs < matrl.wavs[-1])
 
-    # Apply Mie theory where wavelengths aren't small compared to particle size
+    # Apply Mie theory, where wavelengths aren't small compared to particle size
     if np.any(mie_region):
         k = np.where(mie_region)[0]
-        q[k] = [calculate_coeffs_mie_theory(x[i], m[i], n_ang=1, qout=qout) for i in k]
+        for i in k:
+            qabs[i], qpr[i], qsca[i] = calculate_coeffs_mie_theory(x[i], m[i])
     
-    # Apply Rayleigh-Gans theory where wavelengths are small compared to size and m~1
+    # Apply Rayleigh-Gans theory, where wavelengths are small compared to size and m~1
     if np.any(rayleigh_gans_region):
         k = np.where(rayleigh_gans_region)[0]
-        q[k] = calculate_coeffs_rayleigh_gans(x[k], m[k], qout=qout)
+        qabs[k], qpr[k], qsca[k] = calculate_coeffs_rayleigh_gans(x[k], m[k])
     
-    # Apply Geometric Optics where wavelengths are small compared to size and m not ~1
+    # Apply Geometric Optics, where wavelengths are small compared to size and not m~1
     if np.any(geometric_region):
         k = np.where(geometric_region)[0]
-        q[k] = calculate_coeffs_geom_optics(np.real(m[k]), qout=qout)
+        qabs[k], qpr[k], qsca[k] = calculate_coeffs_geom_optics(np.real(m[k]))
 
-    return q[0] if np.isscalar(wavs) else q
+    # Store all coefficients in a dictionary
+    return {
+        'abs': qabs,
+        'pr': qpr,
+        'sca': qsca
+    }
 
 @jit(nopython=True)
-def calculate_coeffs_mie_theory(x, m, n_ang=1, qout=7):
+def calculate_coeffs_mie_theory(x, m, n_ang=1):
     """
     Calculate optical coefficients using Mie theory (following Bohren & Huffman, 1998).
-
+    Returns all three coefficients (Qabs, Qpr, Qsca).
+    
     Args:
         x (float): Size parameter, defined as π * diameter * refractive_index_medium / wavelength.
         m (complex): Relative refractive index of the material, defined as sqrt(epsilon).
         n_ang (int, optional): Number of angles at which to calculate the scattering intensities. Defaults to 1.
-        qout (int, optional): Specifies which optical coefficient to return:
-            1 - Qabs: Absorption efficiency
-            2 - Qpr: Radiation pressure efficiency
-            3 - Qsca: Scattering efficiency
-            4 - Qext: Extinction efficiency
-            5 - Qback: Backscattering efficiency
-            6 - asymf: Asymmetry factor
     Returns:
-        float: The requested optical coefficient based on the value of qout.
+        tuple: The requested optical coefficients (Qabs, Qpr, Qsca).
     """
     
     # Number of terms needed in expansion for Mie coeffs (see BH p477)
@@ -352,70 +359,49 @@ def calculate_coeffs_mie_theory(x, m, n_ang=1, qout=7):
 
     # Calculate the optical coefficients (see VH page 128)
     x2 = x * x
-    asymf = 2 * asymf / qsca
-    qsca *= 2 / x2
-    qext = 4 * s1[0].real / x2
+    asymf = 2 * asymf / qsca                # Asymmetry factor
+    qsca = 2 * qsca / x2
+    qext = 4 * s1[0].real / x2              # Extinction efficiency
     qabs = qext - qsca
     qpr = qext - qsca * asymf
-    qback = abs(s1[-1])**2 / (x2 * np.pi)
-    
-    if qout == 1 or qout == 7:
-        return qabs
-    elif qout == 2:
-        return qpr
-    elif qout == 3:
-        return qsca
-    elif qout == 4:
-        return qext
-    elif qout == 5:
-        return qback
-    elif qout == 6:
-        return asymf
-    # else: DOESN'T WORK WITH JIT COMPILER. RETURN TYPES MUST BE THE SAME IN ALL CASES
-    #     return np.array([qabs, qpr, qsca, qext, qback, asymf])
+    # qback = abs(s1[-1])**2 / (x2 * np.pi)   # Backscattering efficiency
 
-def calculate_coeffs_rayleigh_gans(x, m, qout=1):
-    """
-    Calculates Qabs, Qpr, or Qsca for a particle using Rayleigh-Gans theory (BH158 and LD93).
+    return qabs, qpr, qsca
+
+def calculate_coeffs_rayleigh_gans(x, m):
+    """Calculate coefficients (Qabs, Qpr, Qsca) using Rayleigh-Gans theory (BH158 and LD93).
 
     Args:
         x (float): Size parameter of the particle.
         m (complex): Complex refractive index of the particle.
-        qout (int, optional): Specifies which coefficient to return. 
-                              1 for Qabs, 2 for Qpr, 3 for Qsca. Defaults to 1.
     Returns:
-        float: The calculated coefficient (Qabs, Qpr, or Qsca) based on the value of qout.
+        tuple: The requested optical coefficients (Qabs, Qpr, Qsca).
     """
+
     x2 = x * x
     qabs = 8.0 * np.imag(m) * x / 3.0
-    if qout == 1:
-        return qabs
     qsca = 32.0 * np.abs(m - 1)**2 * x2 * x2 / (27.0 + 16.0 * x2)
-    if qout == 3:
-        return qsca
     qpr = qabs + qsca / (1 + 0.3 * x2)
-    return qpr
+    return qabs, qpr, qsca
 
-def calculate_coeffs_geom_optics(refreal, qout=1, n_step=1000):
-    """
-    Calculate either Qabs, Qpr, or Qsca for a particle using geometric optics.
-
+def calculate_coeffs_geom_optics(refreal, n_step=1000):
+    """Calculate coefficients (Qabs, Qpr, Qsca) using geometric optics.
+    
     Args:
-        refreal (numpy.ndarray): Real component(s) of the refractive index.
-        qout (int, optional): Determines the type of scattering coefficient to return:
-                              1 for Qabs, 2 for Qpr, 3 for Qsca. Defaults to 1.
+        refreal (np.ndarray): Real component(s) of the refractive index.
         n_step (int, optional): Number of integration steps. Defaults to 1000.
 
     Returns:
-        numpy.ndarray: Array of scattering coefficients corresponding to the input refractive indices.
+        tuple: The requested optical coefficients (Qabs, Qpr, Qsca).
     """
-    
-    x = np.linspace(0, 1, n_step)                # x is [cos(theta)]^2
+
+    x = np.linspace(0, 1, n_step)
     sint = np.sqrt(1.0 - x)
-    cos2t = 2 * x - 1 if qout != 1 else None    # cos2t = cos(2*theta)
+    cos2t = 2 * x - 1
 
     n_wav = len(refreal)
-    q = np.zeros(n_wav)
+    qabs = np.zeros(n_wav)
+    qpr = np.zeros(n_wav)
     
     for i in range(n_wav):
         sintp = np.sqrt(np.maximum(0.0, 1.0 - x / refreal[i]**2))
@@ -423,39 +409,25 @@ def calculate_coeffs_geom_optics(refreal, qout=1, n_step=1000):
         dw1 = np.ones(n_step)
         k1 = tempir1 != 0
         dw1[k1] = ((sint[k1] - refreal[i] * sintp[k1]) / tempir1[k1])**2
-        int1 = dw1 if qout == 1 else dw1 * cos2t
 
         tempir2 = refreal[i] * sint + sintp
         dw2 = np.ones(n_step)
         k2 = tempir2 != 0
         dw2[k2] = ((refreal[i] * sint[k2] - sintp[k2]) / tempir2[k2])**2
-        int2 = dw2 if qout == 1 else dw2 * cos2t
-
-        # For the integration, add a fudge factor (0.6) which is then subtracted
-        q[i] = 1.0 - 0.5 * (simpson(int1 + int2 + 0.6, x=x) - 0.6) ## CHECK THAT VALUES ARE INCREASING IF NEEDED
-    
-    # This is a real fudge to get Qsca by Qsca=Qpr-Qabs. 
-    # This is not necessarily true since Qpr=Qabs+Qsca(1-cos(alpha)).
-    # Since q=Qpr now, we just need to redo the calculation to get q2=Qabs
-    if qout == 3:
-        q2 = np.zeros(n_wav)
-        for i in range(n_wav):
-            sintp = np.sqrt(np.maximum(0.0, 1.0 - x / refreal[i]**2))
-            tempir1 = sint + refreal[i] * sintp
-            dw1 = np.ones(n_step)
-            k1 = tempir1 != 0
-            dw1[k1] = ((sint[k1] - refreal[i] * sintp[k1]) / tempir1[k1])**2
-            int1 = dw1
-
-            tempir2 = refreal[i] * sint + sintp
-            dw2 = np.ones(n_step)
-            k2 = tempir2 != 0
-            dw2[k2] = ((refreal[i] * sint[k2] - sintp[k2]) / tempir2[k2])**2
-            int2 = dw2
-
-            # For the integration, add a fudge factor (0.6) which is then subtracted
-            q2[i] = 1.0 - 0.5 * (simpson(int1 + int2 + 0.6, x=x) - 0.6)
         
-        q -= q2
-    
-    return q
+        # Calculate qabs using dw1 and dw2 directly
+        # For the integration, add a fudge factor (0.6) which is then subtracted
+        int1_abs = dw1
+        int2_abs = dw2
+        qabs[i] = 1.0 - 0.5 * (np.trapezoid(int1_abs + int2_abs + 0.6, x=x) - 0.6)
+
+        # Calculate qpr using dw1 and dw2 multiplied by cos2t
+        int1_pr = dw1 * cos2t
+        int2_pr = dw2 * cos2t
+        qpr[i] = 1.0 - 0.5 * (np.trapezoid(int1_pr + int2_pr + 0.6, x=x) - 0.6)
+
+    # This is a real fudge to get Qsca by Qsca=Qpr-Qabs,
+    # which is not necessarily true since Qpr=Qabs+Qsca(1-cos(alpha)).
+    qsca = qpr - qabs
+
+    return qabs, qpr, qsca
