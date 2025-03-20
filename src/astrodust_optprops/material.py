@@ -3,7 +3,7 @@ import importlib.resources as pkg_resources
 from pathlib import Path
 from scipy.optimize import fsolve
 
-with pkg_resources.files('optprops') / 'material_data' as matrl_data_path:
+with pkg_resources.files('astrodust_optprops') / 'material_data' as matrl_data_path:
     matrl_data_path = Path(matrl_data_path)
 
 class Material:

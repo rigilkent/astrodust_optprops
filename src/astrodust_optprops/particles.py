@@ -3,7 +3,7 @@ import numpy as np
 import warnings
 import astropy.constants as const
 import astropy.units as u
-import optprops.optics_core as core
+import astrodust_optprops.optics_core as core
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from matplotlib.colors import LogNorm

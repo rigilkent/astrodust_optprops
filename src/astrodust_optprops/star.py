@@ -1,8 +1,8 @@
 import numpy as np
 import astropy.units as u
 import astropy.constants as const
-from optprops.optics_core import calculate_spectral_flux_density_bb
 import matplotlib.pyplot as plt
+from astrodust_optprops.optics_core import calculate_spectral_flux_density_bb
 
 class Star:
     """

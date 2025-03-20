@@ -305,7 +305,7 @@ def calculate_coeffs_mie_theory(x, m, n_ang=1):
     psi1 = np.sin(x)
     chi0 = -np.sin(x)
     chi1 = np.cos(x)
-    xi0 = psi0 - 1j * chi0
+    # xi0 = psi0 - 1j * chi0    # not needed.
     xi1 = psi1 - 1j * chi1
     
     # Set some other initial values
@@ -353,7 +353,6 @@ def calculate_coeffs_mie_theory(x, m, n_ang=1):
         bn1 = bn
         psi0, psi1 = psi1, psi
         chi0, chi1 = chi1, chi
-        # xi1 = psi - 1j * chi # This seems redundant???
         xi1 = xi
         pi0, pi1 = pi1, pi
 

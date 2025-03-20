@@ -1,6 +1,6 @@
 from pathlib import Path
 import numpy as np
-import optprops as opt
+import astrodust_optprops as opt
 
 script_dir = Path(__file__).parent
 
