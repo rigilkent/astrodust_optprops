@@ -425,8 +425,9 @@ def calculate_coeffs_geom_optics(refreal, n_step=1000):
         int2_pr = dw2 * cos2t
         qpr[i] = 1.0 - 0.5 * (np.trapezoid(int1_pr + int2_pr + 0.6, x=x) - 0.6)
 
-    # This is a real fudge to get Qsca by Qsca=Qpr-Qabs,
-    # which is not necessarily true since Qpr=Qabs+Qsca(1-cos(alpha)).
-    qsca = qpr - qabs
+    # In the geometric optics regime, Q_ext = 2, due to diffraction, 
+    # see "extinction paradox" in Bohren & Huffman, 1983.
+    qext = 2
+    qsca = qext - qabs
 
     return qabs, qpr, qsca

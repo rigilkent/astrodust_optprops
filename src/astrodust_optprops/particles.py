@@ -11,7 +11,7 @@ from matplotlib.colors import LogNorm
 class Particles:
     def __init__(self, diams, wavs, matrl, dists=None, 
                  show_progress=True, precompute_Qs=True,
-                 suppress_mie_resonance=False, max_deviation=1):
+                 suppress_mie_resonance=False, size_averaging_window=2):
         """Initialize Particles object.
         
         Args:
@@ -22,7 +22,7 @@ class Particles:
             show_progress (bool, optional): Whether to show progress bars for computations. Defaults to True.
             precompute_Qs (bool, optional): Whether to precompute scattering coefficients. Defaults to True.
             suppress_mie_resonance (bool, optional): Whether to suppress Mie resonances by averaging over nearby sizes. Defaults to False.
-            max_deviation (float, optional): Determines the diameter averaging window in Mie resonances suppression. Defaults to 1.
+            size_averaging_window (float, optional): Determines the diameter averaging window in Mie resonances suppression. Defaults to 1.
             
         Raises:
             ValueError: If any of the required parameters is None
@@ -56,7 +56,7 @@ class Particles:
 
         self.show_progress = show_progress
         self.suppress_mie_resonance = suppress_mie_resonance
-        self.max_deviation = max_deviation
+        self.size_averaging_window = size_averaging_window
         self.precompute_Qs = precompute_Qs
 
         if self.suppress_mie_resonance and not self.precompute_Qs:
@@ -103,8 +103,8 @@ class Particles:
         
         if self.suppress_mie_resonance:
             # Create a fine logarithmic grid of diameters
-            min_diam = self.diams.min() / (1 + self.max_deviation)
-            max_diam = self.diams.max() * (1 + self.max_deviation)
+            min_diam = self.diams.min() / self.size_averaging_window
+            max_diam = self.diams.max() * self.size_averaging_window
             points_per_decade = 150                 # No benefit above 150
             n_decades = np.log10(max_diam) - np.log10(min_diam)
             n_fine = int(points_per_decade * n_decades)
@@ -116,14 +116,17 @@ class Particles:
             # For each requested diameter, average over nearby grid points
             for diam in self.diams:
                 # Define diameter window for averaging
-                diam_min = diam / (1 + self.max_deviation)
-                diam_max = diam * (1 + self.max_deviation)
+                diam_min = diam / self.size_averaging_window
+                diam_max = diam * self.size_averaging_window
                 mask = (fine_diams >= diam_min) & (fine_diams <= diam_max)
                 
                 # Average coefficients within window
-                self.precomputed_Qabs[diam] = np.mean(fine_Qabs[mask], axis=0)
-                self.precomputed_Qpr[diam] = np.mean(fine_Qpr[mask], axis=0)
-                self.precomputed_Qsca[diam] = np.mean(fine_Qsca[mask], axis=0)
+                # Use log-averaging (geometric mean) for coefficients to accurately represent 
+                # multiplicative variations in particle sizes and prevent bias toward larger sizes, 
+                # as confirmed by tests matching single-size coefficients in non-resonant regime.
+                self.precomputed_Qabs[diam] = 10**np.mean(np.log10(fine_Qabs[mask]), axis=0)
+                self.precomputed_Qpr[diam] = 10**np.mean(np.log10(fine_Qpr[mask]), axis=0)
+                self.precomputed_Qsca[diam] = 10**np.mean(np.log10(fine_Qsca[mask]), axis=0)
 
         else:
             # If not suppressing, just compute at requested diameters
@@ -671,5 +674,73 @@ class Particles:
         ax.set_ylabel('Particle diameter (µm)')
         ax.set_xscale('log')
         ax.set_yscale('log')
+
+        return ax
+
+    def plot_Q(self, ax=None, diams=None, as_contour=False, n_contour_levels=100, add_contour_lines=[.1, 1], Q_type='abs'):
+        """Plot optical efficiency (Qabs, Qsca, or Qpr) as a function of wavelength.
+
+        Can create either line plots for specific particle diameters or a 2D contour plot
+        showing the selected Q property for all particle sizes and wavelengths.
+
+        Args:
+            ax (matplotlib.axes.Axes, optional): Axes to plot on. If None, creates new figure.
+            diams (array-like, optional): Diameters to plot in line plot mode. If None and
+                as_contour=False, uses [3, 10, 30, 100, 300, 1000] µm. Ignored if as_contour=True.
+            as_contour (bool, optional): If True, creates contour plot. If False, creates line
+                plots. Defaults to False.
+            n_contour_levels (int, optional): Number of contour levels in 2D plot. Only used
+                if as_contour=True. Defaults to 100.
+            add_contour_lines (list, optional): Values at which to add contour lines in 2D
+                plot. Only used if as_contour=True. Set to None to disable. Defaults to [0.1, 1].
+            Q_type (str, optional): Type of optical efficiency to plot ('abs', 'sca', or 'pr').
+                Defaults to 'abs'.
+
+        Returns:
+            matplotlib.axes.Axes: The axes containing the plot.
+        """
+        if Q_type not in ['abs', 'sca', 'pr']:
+            raise ValueError("Invalid Q_type. Must be one of 'abs', 'sca', or 'pr'.")
+
+        Q_data = getattr(self, f"Q{Q_type}")
+
+        if ax is None:
+            _, ax = plt.subplots()
+
+        if as_contour:
+            if diams is not None:
+                warnings.warn("plot_Q(): Input 'diams' is ignored when as_contour=True", UserWarning)
+            contour = ax.contourf(self.wavs, self.diams, Q_data,
+                                  levels=np.logspace(-2, np.log10(2), n_contour_levels),
+                                  norm=LogNorm(vmin=1e-2, vmax=2),
+                                  extend='min')
+
+            cbar = plt.colorbar(contour, ax=ax, label=rf'$Q_\mathrm{{{Q_type}}}$', pad=.01)
+            cbar.ax.set_ylabel(cbar.ax.get_ylabel(), fontsize=11)
+            cbar.set_ticks([.01, .1, 1])
+            cbar.ax.minorticks_on()
+            if add_contour_lines is not None:
+                contour_lines = ax.contour(self.wavs, self.diams, Q_data, levels=add_contour_lines,
+                                           colors='k', linewidths=.3, linestyles='dashed')
+                cbar.add_lines(contour_lines)
+            ax.set_ylabel(r'Particle diameter (µm)')
+            ax.set_yscale('log')
+            ax.set_xscale('log')
+        else:
+            ax.hlines(1, xmin=0, xmax=1e4, linestyle='--', linewidth=.8, color='black', alpha=.5)
+            if diams is None:
+                diams = np.logspace(.5, 3, 6)
+            diams = diams[np.logical_and(diams >= self.diams.min(), diams <= self.diams.max())]
+            # Create color progression using a colormap
+            colors = plt.cm.winter(np.linspace(0, 1, len(diams)))
+            for diam, color in zip(diams, colors):
+                idx = np.argmin(np.abs(self.diams - diam))
+                ax.loglog(self.wavs, Q_data[idx, :], label=f'{self.diams[idx]:.0f} µm', color=color, zorder=self.n_diams - idx)
+            ax.legend(title="Particle diameters:", loc='lower left', framealpha=1)
+            ax.set_ylabel(rf'$Q_\mathrm{{{Q_type}}}$', fontsize=12)
+            ax.set_ylim(1e-2, max(np.ceil(Q_data.max()), 2))
+            ax.set_xlim(self.wavs.min(), self.wavs.max())
+
+        ax.set_xlabel('Wavelength (µm)')
 
         return ax

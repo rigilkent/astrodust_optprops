@@ -164,6 +164,7 @@ cython_debug/
 
 # Ignore dated code
 /examples/Fomalhaut/make_fomalhaut_specfile.py
+/examples/Fomalhaut/test_mie_suppression.py
 /examples/*/*.json
 /examples/*/*.pkl
 /examples/*/*.png
@@ -176,3 +177,5 @@ cython_debug/
 !/src/astrodust_optprops/material_data/lg_crsil.dat
 !/src/astrodust_optprops/material_data/lg_ice.dat
 !/src/astrodust_optprops/material_data/lg_org.dat
+/src/astrodust_optprops/astrodust/*
+/src/astrodust_optprops/optprops/*
