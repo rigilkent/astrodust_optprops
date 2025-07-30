@@ -1,5 +1,6 @@
 import numpy as np
 from numba import jit
+import warnings
 
 
 def get_logwav_integration_grid(temperature, n_step=400):
@@ -53,22 +54,18 @@ def calculate_spectral_flux_density(logwavs, temp=None, star=None, diam=None,
         The factor "pi" converts spectral radiance, B_λ (W/m^2/µm/sr), into spec. flux density, F_λ (W/m^2/µm).
     """
 
-    if temp is None and star is None:
-        raise ValueError("Either 'temp' or 'star' must be provided.")
-    if Q_interpolator is None and matrl is None and Q_type is not None:
-        raise ValueError("If 'Q_interpolator' is not provided, 'matrl' AND 'Q_type' must be provided.")
+    if Q_type is not None and matrl is None:
+        raise ValueError("If 'Q_type' is provided, 'matrl' must also be provided.")
 
     wavs = 10.0**logwavs
     
-    if temp is not None:
+    if star is not None:
+        flux = star.get_spectral_flux_density(wavs)
+    elif temp is not None:
         flux = calculate_spectral_flux_density_bb(wavs, temp)
-    elif star.is_blackbody:
-        flux = calculate_spectral_flux_density_bb(wavs, star.temp)
     else:
-        # Use stellar spectrum
-        log_flux = np.interp(logwavs, star.log_wavs, star.log_flux_lam)
-        log_flux[np.isinf(log_flux)] = -50.0
-        flux = 10.0**log_flux        
+        raise ValueError("Either 'temp' or 'star' must be provided.")
+
         
     if Q_interpolator is not None:              # Use interpolator if available
         return flux * Q_interpolator(wavs)
