@@ -56,15 +56,16 @@ def calculate_spectral_flux_density(logwavs, temp=None, star=None, diam=None,
 
     if Q_type is not None and matrl is None:
         raise ValueError("If 'Q_type' is provided, 'matrl' must also be provided.")
+    
+    if (temp is None and star is None) or (temp is not None and star is not None):
+        raise ValueError("Exactly one of 'temp' or 'star' must be provided.")
 
     wavs = 10.0**logwavs
     
     if star is not None:
         flux = star.get_spectral_flux_density(wavs)
-    elif temp is not None:
-        flux = calculate_spectral_flux_density_bb(wavs, temp)
     else:
-        raise ValueError("Either 'temp' or 'star' must be provided.")
+        flux = calculate_spectral_flux_density_bb(wavs, temp)
 
         
     if Q_interpolator is not None:              # Use interpolator if available

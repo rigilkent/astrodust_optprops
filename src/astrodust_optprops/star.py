@@ -231,28 +231,54 @@ class Star:
         
         return ax
 
-    def get_spectral_flux_density(self, wavs):
+    @u.quantity_input(distance=u.m)
+    def get_spectral_flux_density(self, wavs, to_jy=False, distance=0*u.au):
         """Get spectral flux density at specified wavelengths.
         
         This method provides a unified interface for getting stellar spectral flux density
         regardless of whether the star is modeled as a blackbody or uses a custom spectrum.
-        
+        The flux density can be returned in either wavelength (default) or frequency domain.
+        Returns either the surface flux density (default) or the observed flux density
+        at a given distance.
+
         Args:
             wavs (float or array-like): Wavelength(s) in µm at which to get flux density
+            to_jy (bool, optional): If True, convert flux density to Jy (frequency units).
+                Defaults to False.
+            distance (astropy.units.Quantity, optional): Distance to the observer.
             
         Returns:
-            float or np.ndarray: Spectral flux density in W/m²/µm
+            float or np.ndarray: Spectral flux density in W/m²/µm (no astropy.unit)
+                or Jy (with astropy.unit) (if to_jy=True).
         """
         wavs = np.atleast_1d(wavs)
         
         if self.is_blackbody:
-            flux = calculate_spectral_flux_density_bb(wavs, self.temp)
+            surface_flux = calculate_spectral_flux_density_bb(wavs, self.temp)
         else:
             # Interpolate custom spectrum in log space for better accuracy
             logwavs = np.log10(wavs)
             log_flux = np.interp(logwavs, self.log_wavs, self.log_flux_lam)
             log_flux[np.isinf(log_flux)] = -50.0  # Handle extrapolation beyond data range
-            flux = 10.0**log_flux
+            surface_flux = 10.0**log_flux
+        
+        
+        if to_jy:
+            # Convert from wavelength to frequency units (Jy)
+            F_lambda = surface_flux * u.W / u.m**2 / u.um   # W/m²/μm
+            F_nu_W_m2_Hz = (F_lambda * (wavs*u.um)**2) / const.c
+            surface_flux = F_nu_W_m2_Hz.to(u.Jy)
+        
+        if distance == 0 * distance.unit:
+            flux = surface_flux
+        else:
+            # Calculate stellar radius from luminosity and temperature
+            # L = 4π R² σ T⁴  =>  R = sqrt(L / (4π σ T⁴))
+            luminosity = self.lum_suns * const.L_sun
+            temperature = self.temp * u.K
+            stellar_radius = ((luminosity / (4 * np.pi * const.sigma_sb * temperature**4))**0.5)
+            # Apply inverse square law: flux_observed = surface_flux * (R_star / distance)²
+            flux = surface_flux * (stellar_radius / distance).to(1)**2        
             
         # Return scalar if input was scalar
         if np.isscalar(wavs) or len(wavs) == 1:
